@@ -4,8 +4,11 @@ using Newtonsoft.Json.Linq;
 using System;
 using System.Linq;
 using System.Threading.Tasks;
+using System.Net.Http;
 using NadekoBot.Extensions;
+using System.Xml;
 using System.Threading;
+using System.Collections.Concurrent;
 using NadekoBot.Common;
 using NadekoBot.Common.Attributes;
 using NadekoBot.Common.Collections;
@@ -235,16 +238,34 @@ namespace NadekoBot.Modules.NSFW
         }
 
         [NadekoCommand, Usage, Description, Aliases]
+        public async Task E621([Remainder] string tag = null)
+        {
+            tag = tag?.Trim() ?? "";
+
+            var url = await GetE621ImageLink(tag).ConfigureAwait(false);
+
+            if (url == null)
+                await ReplyErrorLocalized("not_found").ConfigureAwait(false);
+            else if (url[0] == "0")
+            {
+                await Context.Channel.EmbedAsync(new EmbedBuilder().WithErrorColor()
+                    .WithDescription(Context.User.Mention + " You used a blacklisted tag, " + url[1] + "."));
+            }
+            else
+                await Context.Channel.EmbedAsync(new EmbedBuilder().WithColor(new Discord.Color(0x3f6b94))
+                    .WithDescription(Context.User.Mention + " " + tag + "\nhttps://e621.net/post/show/" + url[1])
+                    .WithImageUrl(url[0])
+                    .WithUrl($"https://e621.net/post/show/" + url[1]))
+                    .ConfigureAwait(false);
+        }
+
+        [NadekoCommand, Usage, Description, Aliases]
         public Task Yandere([Remainder] string tag = null)
             => InternalDapiCommand(tag, DapiSearchType.Yandere, false);
 
         [NadekoCommand, Usage, Description, Aliases]
         public Task Konachan([Remainder] string tag = null)
             => InternalDapiCommand(tag, DapiSearchType.Konachan, false);
-
-        [NadekoCommand, Usage, Description, Aliases]
-        public Task E621([Remainder] string tag = null)
-            => InternalDapiCommand(tag, DapiSearchType.E621, false);
 
         [NadekoCommand, Usage, Description, Aliases]
         public Task Rule34([Remainder] string tag = null)
@@ -320,6 +341,104 @@ namespace NadekoBot.Modules.NSFW
             _service.ClearCache();
             return Context.Channel.SendConfirmAsync("👌");
         }
+
+        public static Task<string[]> GetE621ImageLink(string tag) => Task.Run(async () =>
+        {
+            try
+            {
+                using (var http = new HttpClient())
+                {
+                    var loop_count = 0;
+                    http.AddFakeHeaders();
+                    var data = await http.GetStreamAsync("http://e621.net/post/index.xml?tags=" + tag).ConfigureAwait(false);
+                    var doc = new XmlDocument();
+                    doc.Load(data);
+                    var post = doc.GetElementsByTagName("post");
+                    bool safe = false;
+                    var random = new NadekoRandom().Next(0, post.Count);
+                    string[] blacklist = new string[] { "scat", "gore", "cub", "rape", "human_on_anthro", "mlp", "friendship_is_magic" }; //                       BLACKLIST
+                    string[] user_tag = tag.Split(new char[] { ' ' });
+                    for (int i = 0; i < user_tag.Length; i++)
+                    {
+                        for (int b = 0; b < blacklist.Length; b++)
+                        {
+                            if (user_tag[i] == blacklist[b])
+                            {
+                                string[] fake = new string[] { "0", blacklist[b] };
+                                return fake;
+                            }
+                        }
+                    }
+
+                RESTART:
+
+                    while (safe == false)
+                    {
+                        loop_count++;
+                        var tags = doc.GetElementsByTagName("tags");
+                        var file_type = doc.GetElementsByTagName("file_ext");
+                        var file_type_a = file_type[random];
+
+                        if (file_type_a.InnerText == "webm" || file_type_a.InnerText == "swf")
+                        {
+                            random = new NadekoRandom().Next(0, post.Count);
+
+                            if (loop_count > post.Count)
+                                return null;
+
+                            goto RESTART;
+                        }
+
+                        var tags_c = tags[random];
+                        var tags_b = tags_c.InnerText;
+                        String[] splitTags = tags_b.Split(new char[] { ' ' });
+
+                        for (int i = 0; i < splitTags.Length; i++)
+                        {
+
+                            for (int b = 0; b < blacklist.Length; b++)
+                            {
+
+                                if (splitTags[i] == blacklist[b])
+                                {
+                                    safe = false;
+                                    i = splitTags.Length;
+                                    random = new NadekoRandom().Next(0, post.Count);
+
+                                    if (loop_count > post.Count)
+                                        return null;
+
+                                    break;
+                                }
+
+                                else
+                                {
+                                    safe = true;
+                                }
+                            }
+                        }
+                    }
+
+
+                    var file = doc.GetElementsByTagName("file_url");
+                    var number = doc.GetElementsByTagName("id");
+
+                    var picture = file[random];
+                    var id = number[random];
+
+                    var export = new string[2];
+
+                    export[0] = picture.InnerText;
+                    export[1] = id.InnerText;
+
+                    return export;
+                }
+            }
+            catch
+            {
+                return null;
+            }
+        });
 
         public async Task InternalDapiCommand(string tag, DapiSearchType type, bool forceExplicit)
         {
